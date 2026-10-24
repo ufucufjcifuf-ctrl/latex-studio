@@ -68,7 +68,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(btnSetupEngine)
 
         btnQuickTest = Button(this).apply {
-            text = "2. Quick Test (Hello World PDF)"
+            text = "2. Quick Test (Math PDF)"
             setOnClickListener {
                 if (checkPermission()) runCompilation(isQuickTest = true) else requestPermission()
             }
@@ -187,13 +187,13 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 appendLog("[*] Starting extraction with POSIX symlinks & permissions...")
-                appendLog("[*] Please wait 1-2 minutes, do not close the app...")
+                appendLog("[*] Please wait 1-2 minutes...")
                 debianDir.deleteRecursively()
                 debianDir.mkdirs()
 
                 extractTarXz(archiveFile, debianDir)
                 markerFile.createNewFile()
-                appendLog("[+] Extraction complete! Engine is ready to compile.")
+                appendLog("[+] Extraction complete! Engine is ready.")
 
             } catch (e: Exception) {
                 appendLog("[-] EXTRACTION FAILED: ${e.message}")
@@ -260,7 +260,31 @@ class MainActivity : AppCompatActivity() {
             try {
                 val debianDir = File(filesDir, "debian")
                 val workDir = File(filesDir, "workspace").apply { mkdirs() }
+                val myNotesDir = File("/storage/emulated/0/Documents/MyNotes")
                 val targetTexName = if (isQuickTest) "quick_test.tex" else "vector.tex"
+
+                // 1. Locate and ensure Kalpurush.ttf is in workspace
+                val possibleFontLocations = listOf(
+                    File(debianDir, "root/.local/share/fonts/Kalpurush.ttf"),
+                    File(debianDir, "usr/share/fonts/Kalpurush.ttf"),
+                    File(debianDir, "usr/local/share/fonts/Kalpurush.ttf"),
+                    File(myNotesDir, "Kalpurush.ttf")
+                )
+                for (f in possibleFontLocations) {
+                    if (f.exists()) {
+                        f.copyTo(File(workDir, "Kalpurush.ttf"), overwrite = true)
+                        appendLog("[+] Found and linked font: ${f.name}")
+                        break
+                    }
+                }
+
+                // 2. Copy all supporting assets from MyNotes (images, figures)
+                myNotesDir.listFiles()?.forEach { file ->
+                    val ext = file.extension.lowercase()
+                    if (ext in listOf("png", "jpg", "jpeg", "pdf", "eps", "sty", "ttf", "otf")) {
+                        file.copyTo(File(workDir, file.name), overwrite = true)
+                    }
+                }
 
                 if (isQuickTest) {
                     val quickCode = """
@@ -276,7 +300,7 @@ class MainActivity : AppCompatActivity() {
                     File(workDir, targetTexName).writeText(quickCode)
                     appendLog("[*] Prepared quick_test.tex")
                 } else {
-                    val vectorTex = File("/storage/emulated/0/Documents/MyNotes/vector.tex")
+                    val vectorTex = File(myNotesDir, "vector.tex")
                     if (!vectorTex.exists()) {
                         appendLog("[-] ERROR: vector.tex not found in Documents/MyNotes!")
                         return@launch
@@ -305,14 +329,15 @@ class MainActivity : AppCompatActivity() {
         val loaderBin = File(nativeDir, "libproot-loader.so").absolutePath
         val tmpDir = File(cacheDir, "proot_tmp").apply { mkdirs() }
 
+        // Notice: Mount workDir to /workspace, leaving /root completely intact!
         val cmd = listOf(
             prootBin,
             "-0",
             "-r", rootfs.absolutePath,
             "-b", "/dev",
             "-b", "/proc",
-            "-b", "${workDir.absolutePath}:/root",
-            "-w", "/root",
+            "-b", "${workDir.absolutePath}:/workspace",
+            "-w", "/workspace",
             "/usr/bin/lualatex",
             "--interaction=nonstopmode",
             texFileName
@@ -324,6 +349,7 @@ class MainActivity : AppCompatActivity() {
         pb.environment()["TMPDIR"] = tmpDir.absolutePath
         pb.environment()["LD_LIBRARY_PATH"] = nativeDir
         pb.environment()["HOME"] = "/root"
+        pb.environment()["OSFONTDIR"] = "/workspace//:/root/.local/share/fonts//:/usr/share/fonts//"
         pb.environment()["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         pb.redirectErrorStream(true)
 
@@ -339,6 +365,12 @@ class MainActivity : AppCompatActivity() {
         val pdfName = texFileName.substringBeforeLast(".") + ".pdf"
         val outPdf = File(workDir, pdfName)
 
+        // Always copy transcript log back to MyNotes for debugging
+        val logFile = File(workDir, texFileName.substringBeforeLast(".") + ".log")
+        if (logFile.exists()) {
+            logFile.copyTo(File("/storage/emulated/0/Documents/MyNotes/${texFileName.substringBeforeLast(".")}.log"), overwrite = true)
+        }
+
         if (exitCode == 0 && outPdf.exists()) {
             appendLog("\n========================================")
             appendLog("[SUCCESS] PDF Created Successfully! 🎉")
@@ -351,7 +383,7 @@ class MainActivity : AppCompatActivity() {
             if (outPdf.exists()) {
                 val destPdf = File("/storage/emulated/0/Documents/MyNotes/APP_GENERATED_$pdfName")
                 outPdf.copyTo(destPdf, overwrite = true)
-                appendLog("[+] PDF saved to: Documents/MyNotes/APP_GENERATED_$pdfName")
+                appendLog("[+] Generated PDF saved to: Documents/MyNotes/APP_GENERATED_$pdfName")
             }
         }
     }
