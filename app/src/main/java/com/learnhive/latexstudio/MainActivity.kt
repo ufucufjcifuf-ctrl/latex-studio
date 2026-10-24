@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.system.Os
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -16,37 +17,58 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.tukaani.xz.XZInputStream
+import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStreamReader
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var logView: TextView
     private lateinit var scrollView: ScrollView
-    private lateinit var btnCompileVector: Button
+    private lateinit var statusView: TextView
+    private lateinit var btnSetupEngine: Button
     private lateinit var btnQuickTest: Button
+    private lateinit var btnCompileVector: Button
 
     private val logQueue = StringBuilder()
-    private var isCompiling = false
+    private var isBusy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 48, 32, 32)
+            setPadding(32, 40, 32, 32)
         }
 
         val titleView = TextView(this).apply {
             text = "Learn Hive LaTeX Studio\nOffline Engine Console"
             textSize = 22f
-            setPadding(0, 0, 0, 24)
+            setPadding(0, 0, 0, 16)
         }
         layout.addView(titleView)
 
+        statusView = TextView(this).apply {
+            textSize = 15f
+            setPadding(0, 0, 0, 20)
+        }
+        layout.addView(statusView)
+
+        btnSetupEngine = Button(this).apply {
+            text = "1. Setup / Extract Engine (Wait 1-2 mins)"
+            setOnClickListener {
+                if (checkPermission()) startEngineExtraction() else requestPermission()
+            }
+        }
+        layout.addView(btnSetupEngine)
+
         btnQuickTest = Button(this).apply {
-            text = "1. Quick Test (Hello World PDF)"
+            text = "2. Quick Test (Hello World PDF)"
             setOnClickListener {
                 if (checkPermission()) runCompilation(isQuickTest = true) else requestPermission()
             }
@@ -54,7 +76,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(btnQuickTest)
 
         btnCompileVector = Button(this).apply {
-            text = "2. Compile Heavy (vector.tex)"
+            text = "3. Compile Heavy (vector.tex)"
             setOnClickListener {
                 if (checkPermission()) runCompilation(isQuickTest = false) else requestPermission()
             }
@@ -69,7 +91,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         logView = TextView(this).apply {
-            text = "Engine Ready. Tap an option above to compile.\n"
+            text = "System Initialized.\n"
             textSize = 13f
             setPadding(0, 16, 0, 0)
         }
@@ -80,6 +102,7 @@ class MainActivity : AppCompatActivity() {
 
         if (!checkPermission()) requestPermission()
         startLogDispatcher()
+        refreshEngineStatus()
     }
 
     private fun checkPermission(): Boolean {
@@ -97,6 +120,28 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }
+        }
+    }
+
+    private fun isEngineReady(): Boolean {
+        val debianDir = File(filesDir, "debian")
+        val markerFile = File(debianDir, ".extracted_posix_ok")
+        return debianDir.exists() && markerFile.exists()
+    }
+
+    private fun refreshEngineStatus() {
+        if (isEngineReady()) {
+            statusView.text = "Engine Status: Ready ✅"
+            btnSetupEngine.isEnabled = false
+            btnSetupEngine.text = "Engine Installed & Ready ✅"
+            btnQuickTest.isEnabled = !isBusy
+            btnCompileVector.isEnabled = !isBusy
+        } else {
+            statusView.text = "Engine Status: Not Extracted ❌ (Tap Button 1 below)"
+            btnSetupEngine.isEnabled = !isBusy
+            btnSetupEngine.text = "1. Setup / Extract Engine (Only Needed Once)"
+            btnQuickTest.isEnabled = false
+            btnCompileVector.isEnabled = false
         }
     }
 
@@ -125,15 +170,91 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setButtonsEnabled(enabled: Boolean) {
-        btnQuickTest.isEnabled = enabled
-        btnCompileVector.isEnabled = enabled
+    private fun startEngineExtraction() {
+        if (isBusy) return
+        isBusy = true
+        btnSetupEngine.isEnabled = false
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val debianDir = File(filesDir, "debian")
+                val archiveFile = File("/storage/emulated/0/Documents/MyNotes/engine_core.tar.xz")
+                val markerFile = File(debianDir, ".extracted_posix_ok")
+
+                if (!archiveFile.exists()) {
+                    appendLog("[-] ERROR: engine_core.tar.xz not found in Documents/MyNotes!")
+                    return@launch
+                }
+
+                appendLog("[*] Starting extraction with POSIX symlinks & permissions...")
+                appendLog("[*] Please wait 1-2 minutes, do not close the app...")
+                debianDir.deleteRecursively()
+                debianDir.mkdirs()
+
+                extractTarXz(archiveFile, debianDir)
+                markerFile.createNewFile()
+                appendLog("[+] Extraction complete! Engine is ready to compile.")
+
+            } catch (e: Exception) {
+                appendLog("[-] EXTRACTION FAILED: ${e.message}")
+            } finally {
+                withContext(Dispatchers.Main) {
+                    isBusy = false
+                    refreshEngineStatus()
+                }
+            }
+        }
+    }
+
+    private fun extractTarXz(archive: File, targetDir: File) {
+        FileInputStream(archive).use { fis ->
+            BufferedInputStream(fis, 65536).use { bis ->
+                XZInputStream(bis).use { xzis ->
+                    TarArchiveInputStream(xzis).use { tar ->
+                        var entry = tar.nextEntry
+                        var count = 0
+                        while (entry != null) {
+                            val dest = File(targetDir, entry.name)
+                            if (entry.isDirectory) {
+                                dest.mkdirs()
+                            } else if (entry.isSymbolicLink) {
+                                dest.parentFile?.mkdirs()
+                                dest.delete()
+                                try {
+                                    Os.symlink(entry.linkName, dest.absolutePath)
+                                } catch (ignored: Exception) {
+                                }
+                            } else {
+                                dest.parentFile?.mkdirs()
+                                FileOutputStream(dest).use { fos ->
+                                    tar.copyTo(fos)
+                                }
+                                val mode = entry.mode
+                                if (mode > 0) {
+                                    try {
+                                        Os.chmod(dest.absolutePath, mode)
+                                    } catch (e: Exception) {
+                                        dest.setExecutable((mode and 73) != 0, false)
+                                    }
+                                }
+                            }
+                            count++
+                            if (count % 3000 == 0) {
+                                appendLog("[*] Extracted $count files...")
+                            }
+                            entry = tar.nextEntry
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun runCompilation(isQuickTest: Boolean) {
-        if (isCompiling) return
-        isCompiling = true
-        setButtonsEnabled(false)
+        if (isBusy) return
+        isBusy = true
+        btnQuickTest.isEnabled = false
+        btnCompileVector.isEnabled = false
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -171,8 +292,8 @@ class MainActivity : AppCompatActivity() {
                 appendLog("[-] CRASH: ${e.message}")
             } finally {
                 withContext(Dispatchers.Main) {
-                    isCompiling = false
-                    setButtonsEnabled(true)
+                    isBusy = false
+                    refreshEngineStatus()
                 }
             }
         }

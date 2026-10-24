@@ -12,6 +12,7 @@
         android:label="LaTeX Studio"
         android:largeHeap="true"
         android:hardwareAccelerated="true"
+        android:hasFragileUserData="true"
         android:extractNativeLibs="true"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
         <activity
