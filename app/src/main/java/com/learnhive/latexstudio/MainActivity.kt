@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.system.Os
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -113,30 +114,34 @@ class MainActivity : AppCompatActivity() {
                 val debianDir = File(filesDir, "debian")
                 val archiveFile = File("/storage/emulated/0/Documents/MyNotes/engine_core.tar.xz")
                 val vectorTex = File("/storage/emulated/0/Documents/MyNotes/vector.tex")
+                val markerFile = File(debianDir, ".extracted_posix_ok")
 
                 if (!archiveFile.exists()) {
                     appendLog("[-] ERROR: engine_core.tar.xz not found in Documents/MyNotes!")
                     return@launch
                 }
 
-                if (!debianDir.exists() || debianDir.list().isNullOrEmpty()) {
-                    appendLog("[*] Unpacking engine_core.tar.xz into private storage... (Wait 1-2 mins)")
+                // Clean re-extract with full POSIX permissions
+                if (!markerFile.exists()) {
+                    appendLog("[*] Extracting with real POSIX +x & Symlinks (Please wait 1-2 mins)...")
+                    debianDir.deleteRecursively()
                     debianDir.mkdirs()
                     extractTarXz(archiveFile, debianDir)
-                    appendLog("[+] Rootfs extracted successfully!")
+                    markerFile.createNewFile()
+                    appendLog("[+] Rootfs extracted with full executable permissions!")
                 } else {
-                    appendLog("[+] Existing rootfs found. Skipping extraction.")
+                    appendLog("[+] POSIX Rootfs ready.")
                 }
 
-                // Copy vector.tex into workspace
+                // Workspace setup
                 val workDir = File(filesDir, "workspace").apply { mkdirs() }
                 if (vectorTex.exists()) {
                     vectorTex.copyTo(File(workDir, "vector.tex"), overwrite = true)
-                    appendLog("[+] Copied vector.tex to workspace.")
+                    appendLog("[+] Prepared vector.tex in workspace.")
                 }
 
-                // Execute PRoot + LuaLaTeX
-                appendLog("[*] Launching LuaLaTeX offline engine via PRoot...")
+                // Launch Engine
+                appendLog("[*] Launching LuaLaTeX...")
                 runLuaLaTeX(debianDir, workDir)
 
             } catch (e: Exception) {
@@ -151,19 +156,39 @@ class MainActivity : AppCompatActivity() {
 
     private fun extractTarXz(archive: File, targetDir: File) {
         FileInputStream(archive).use { fis ->
-            BufferedInputStream(fis).use { bis ->
+            BufferedInputStream(fis, 65536).use { bis ->
                 XZInputStream(bis).use { xzis ->
                     TarArchiveInputStream(xzis).use { tar ->
                         var entry = tar.nextEntry
+                        var count = 0
                         while (entry != null) {
                             val dest = File(targetDir, entry.name)
                             if (entry.isDirectory) {
                                 dest.mkdirs()
+                            } else if (entry.isSymbolicLink) {
+                                dest.parentFile?.mkdirs()
+                                dest.delete()
+                                try {
+                                    Os.symlink(entry.linkName, dest.absolutePath)
+                                } catch (ignored: Exception) {
+                                }
                             } else {
                                 dest.parentFile?.mkdirs()
                                 FileOutputStream(dest).use { fos ->
                                     tar.copyTo(fos)
                                 }
+                                val mode = entry.mode
+                                if (mode > 0) {
+                                    try {
+                                        Os.chmod(dest.absolutePath, mode)
+                                    } catch (e: Exception) {
+                                        dest.setExecutable((mode and 73) != 0, false)
+                                    }
+                                }
+                            }
+                            count++
+                            if (count % 3000 == 0) {
+                                appendLog("[*] Extracted $count files...")
                             }
                             entry = tar.nextEntry
                         }
@@ -177,6 +202,7 @@ class MainActivity : AppCompatActivity() {
         val nativeDir = applicationInfo.nativeLibraryDir
         val prootBin = File(nativeDir, "libproot.so").absolutePath
         val loaderBin = File(nativeDir, "libproot-loader.so").absolutePath
+        val tmpDir = File(cacheDir, "proot_tmp").apply { mkdirs() }
 
         val cmd = listOf(
             prootBin,
@@ -193,6 +219,8 @@ class MainActivity : AppCompatActivity() {
 
         val pb = ProcessBuilder(cmd)
         pb.environment()["PROOT_LOADER"] = loaderBin
+        pb.environment()["PROOT_TMP_DIR"] = tmpDir.absolutePath
+        pb.environment()["TMPDIR"] = tmpDir.absolutePath
         pb.environment()["LD_LIBRARY_PATH"] = nativeDir
         pb.environment()["HOME"] = "/root"
         pb.environment()["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -208,13 +236,14 @@ class MainActivity : AppCompatActivity() {
 
         val exitCode = process.waitFor()
         if (exitCode == 0) {
-            appendLog("\n[SUCCESS] PDF Generated Successfully! Exit Code: 0")
-            // Copy back output PDF to Documents/MyNotes
+            appendLog("\n========================================")
+            appendLog("[SUCCESS] PDF Generated Successfully! 🎉")
+            appendLog("========================================")
             val outPdf = File(workDir, "vector.pdf")
             if (outPdf.exists()) {
-                val destPdf = File("/storage/emulated/0/Documents/MyNotes/output_app_vector.pdf")
+                val destPdf = File("/storage/emulated/0/Documents/MyNotes/app_vector_success.pdf")
                 outPdf.copyTo(destPdf, overwrite = true)
-                appendLog("[+] Output PDF copied to: Documents/MyNotes/output_app_vector.pdf")
+                appendLog("[+] Saved to: Documents/MyNotes/app_vector_success.pdf")
             }
         } else {
             appendLog("\n[-] Compilation Failed with exit code: $exitCode")
