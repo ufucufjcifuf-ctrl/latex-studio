@@ -46,7 +46,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(titleView)
 
         btnQuickTest = Button(this).apply {
-            text = "1. Quick Test (Hello World + Bangla PDF)"
+            text = "1. Quick Test (Hello World PDF)"
             setOnClickListener {
                 if (checkPermission()) runCompilation(isQuickTest = true) else requestPermission()
             }
@@ -109,7 +109,7 @@ class MainActivity : AppCompatActivity() {
     private fun startLogDispatcher() {
         lifecycleScope.launch(Dispatchers.Main) {
             while (true) {
-                delay(120) // Smooth update: flush logs 8 times per second without freezing UI
+                delay(120)
                 var textToAppend = ""
                 synchronized(logQueue) {
                     if (logQueue.isNotEmpty()) {
@@ -145,7 +145,6 @@ class MainActivity : AppCompatActivity() {
                     val quickCode = """
                         \documentclass{article}
                         \usepackage{amsmath}
-                        \usepackage{fontspec}
                         \begin{document}
                         \Huge Hello from Learn Hive Mobile!
                         \Large
@@ -179,7 +178,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun executeLuaLaTeX(rootfs: File, workDir: File, texFileName: File) {
+    private fun executeLuaLaTeX(rootfs: File, workDir: File, texFileName: String) {
         val nativeDir = applicationInfo.nativeLibraryDir
         val prootBin = File(nativeDir, "libproot.so").absolutePath
         val loaderBin = File(nativeDir, "libproot-loader.so").absolutePath
@@ -195,7 +194,7 @@ class MainActivity : AppCompatActivity() {
             "-w", "/root",
             "/usr/bin/lualatex",
             "--interaction=nonstopmode",
-            texFileName.name
+            texFileName
         )
 
         val pb = ProcessBuilder(cmd)
@@ -216,7 +215,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val exitCode = process.waitFor()
-        val pdfName = texFileName.nameWithoutExtension + ".pdf"
+        val pdfName = texFileName.substringBeforeLast(".") + ".pdf"
         val outPdf = File(workDir, pdfName)
 
         if (exitCode == 0 && outPdf.exists()) {
@@ -231,7 +230,7 @@ class MainActivity : AppCompatActivity() {
             if (outPdf.exists()) {
                 val destPdf = File("/storage/emulated/0/Documents/MyNotes/APP_GENERATED_$pdfName")
                 outPdf.copyTo(destPdf, overwrite = true)
-                appendLog("[+] Partial/Warning PDF saved to: Documents/MyNotes/APP_GENERATED_$pdfName")
+                appendLog("[+] PDF saved to: Documents/MyNotes/APP_GENERATED_$pdfName")
             }
         }
     }
