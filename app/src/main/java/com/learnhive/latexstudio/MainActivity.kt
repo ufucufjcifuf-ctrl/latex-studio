@@ -6,7 +6,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
-import android.system.Os
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -14,28 +13,29 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import org.tukaani.xz.XZInputStream
-import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.InputStreamReader
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var logView: TextView
-    private lateinit var actionButton: Button
+    private lateinit var scrollView: ScrollView
+    private lateinit var btnCompileVector: Button
+    private lateinit var btnQuickTest: Button
+
+    private val logQueue = StringBuilder()
+    private var isCompiling = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 64, 32, 32)
+            setPadding(32, 48, 32, 32)
         }
 
         val titleView = TextView(this).apply {
@@ -45,19 +45,23 @@ class MainActivity : AppCompatActivity() {
         }
         layout.addView(titleView)
 
-        actionButton = Button(this).apply {
-            text = "Setup Engine & Compile vector.tex"
+        btnQuickTest = Button(this).apply {
+            text = "1. Quick Test (Hello World + Bangla PDF)"
             setOnClickListener {
-                if (checkPermission()) {
-                    startSetupAndCompile()
-                } else {
-                    requestPermission()
-                }
+                if (checkPermission()) runCompilation(isQuickTest = true) else requestPermission()
             }
         }
-        layout.addView(actionButton)
+        layout.addView(btnQuickTest)
 
-        val scrollView = ScrollView(this).apply {
+        btnCompileVector = Button(this).apply {
+            text = "2. Compile Heavy (vector.tex)"
+            setOnClickListener {
+                if (checkPermission()) runCompilation(isQuickTest = false) else requestPermission()
+            }
+        }
+        layout.addView(btnCompileVector)
+
+        scrollView = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
@@ -65,140 +69,117 @@ class MainActivity : AppCompatActivity() {
             )
         }
         logView = TextView(this).apply {
-            text = "Logs will appear here...\nReady."
-            textSize = 14f
-            setPadding(0, 24, 0, 0)
+            text = "Engine Ready. Tap an option above to compile.\n"
+            textSize = 13f
+            setPadding(0, 16, 0, 0)
         }
         scrollView.addView(logView)
         layout.addView(scrollView)
 
         setContentView(layout)
 
-        if (!checkPermission()) {
-            requestPermission()
-        }
+        if (!checkPermission()) requestPermission()
+        startLogDispatcher()
     }
 
     private fun checkPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Environment.isExternalStorageManager()
-        } else {
-            true
-        }
+        } else true
     }
 
     private fun requestPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
                     data = Uri.parse("package:$packageName")
-                }
-                startActivity(intent)
+                })
             } catch (e: Exception) {
-                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                startActivity(intent)
+                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }
         }
     }
 
     private fun appendLog(msg: String) {
-        lifecycleScope.launch(Dispatchers.Main) {
-            logView.append("\n" + msg)
+        synchronized(logQueue) {
+            logQueue.append(msg).append("\n")
         }
     }
 
-    private fun startSetupAndCompile() {
-        actionButton.isEnabled = false
+    private fun startLogDispatcher() {
+        lifecycleScope.launch(Dispatchers.Main) {
+            while (true) {
+                delay(120) // Smooth update: flush logs 8 times per second without freezing UI
+                var textToAppend = ""
+                synchronized(logQueue) {
+                    if (logQueue.isNotEmpty()) {
+                        textToAppend = logQueue.toString()
+                        logQueue.clear()
+                    }
+                }
+                if (textToAppend.isNotEmpty()) {
+                    logView.append(textToAppend)
+                    scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
+                }
+            }
+        }
+    }
+
+    private fun setButtonsEnabled(enabled: Boolean) {
+        btnQuickTest.isEnabled = enabled
+        btnCompileVector.isEnabled = enabled
+    }
+
+    private fun runCompilation(isQuickTest: Boolean) {
+        if (isCompiling) return
+        isCompiling = true
+        setButtonsEnabled(false)
+
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val debianDir = File(filesDir, "debian")
-                val archiveFile = File("/storage/emulated/0/Documents/MyNotes/engine_core.tar.xz")
-                val vectorTex = File("/storage/emulated/0/Documents/MyNotes/vector.tex")
-                val markerFile = File(debianDir, ".extracted_posix_ok")
-
-                if (!archiveFile.exists()) {
-                    appendLog("[-] ERROR: engine_core.tar.xz not found in Documents/MyNotes!")
-                    return@launch
-                }
-
-                // Clean re-extract with full POSIX permissions
-                if (!markerFile.exists()) {
-                    appendLog("[*] Extracting with real POSIX +x & Symlinks (Please wait 1-2 mins)...")
-                    debianDir.deleteRecursively()
-                    debianDir.mkdirs()
-                    extractTarXz(archiveFile, debianDir)
-                    markerFile.createNewFile()
-                    appendLog("[+] Rootfs extracted with full executable permissions!")
-                } else {
-                    appendLog("[+] POSIX Rootfs ready.")
-                }
-
-                // Workspace setup
                 val workDir = File(filesDir, "workspace").apply { mkdirs() }
-                if (vectorTex.exists()) {
-                    vectorTex.copyTo(File(workDir, "vector.tex"), overwrite = true)
-                    appendLog("[+] Prepared vector.tex in workspace.")
+                val targetTexName = if (isQuickTest) "quick_test.tex" else "vector.tex"
+
+                if (isQuickTest) {
+                    val quickCode = """
+                        \documentclass{article}
+                        \usepackage{amsmath}
+                        \usepackage{fontspec}
+                        \begin{document}
+                        \Huge Hello from Learn Hive Mobile!
+                        \Large
+                        \par Offline LuaLaTeX on Android (Poco X6).
+                        \par \textbf{Math:} $ E = mc^2 \quad \int_0^\infty e^{-x} dx = 1 $
+                        \end{document}
+                    """.trimIndent()
+                    File(workDir, targetTexName).writeText(quickCode)
+                    appendLog("[*] Prepared quick_test.tex")
+                } else {
+                    val vectorTex = File("/storage/emulated/0/Documents/MyNotes/vector.tex")
+                    if (!vectorTex.exists()) {
+                        appendLog("[-] ERROR: vector.tex not found in Documents/MyNotes!")
+                        return@launch
+                    }
+                    vectorTex.copyTo(File(workDir, targetTexName), overwrite = true)
+                    appendLog("[*] Prepared vector.tex in workspace.")
                 }
 
-                // Launch Engine
-                appendLog("[*] Launching LuaLaTeX...")
-                runLuaLaTeX(debianDir, workDir)
+                appendLog("[*] Launching LuaLaTeX for $targetTexName...")
+                executeLuaLaTeX(debianDir, workDir, targetTexName)
 
             } catch (e: Exception) {
                 appendLog("[-] CRASH: ${e.message}")
             } finally {
                 withContext(Dispatchers.Main) {
-                    actionButton.isEnabled = true
+                    isCompiling = false
+                    setButtonsEnabled(true)
                 }
             }
         }
     }
 
-    private fun extractTarXz(archive: File, targetDir: File) {
-        FileInputStream(archive).use { fis ->
-            BufferedInputStream(fis, 65536).use { bis ->
-                XZInputStream(bis).use { xzis ->
-                    TarArchiveInputStream(xzis).use { tar ->
-                        var entry = tar.nextEntry
-                        var count = 0
-                        while (entry != null) {
-                            val dest = File(targetDir, entry.name)
-                            if (entry.isDirectory) {
-                                dest.mkdirs()
-                            } else if (entry.isSymbolicLink) {
-                                dest.parentFile?.mkdirs()
-                                dest.delete()
-                                try {
-                                    Os.symlink(entry.linkName, dest.absolutePath)
-                                } catch (ignored: Exception) {
-                                }
-                            } else {
-                                dest.parentFile?.mkdirs()
-                                FileOutputStream(dest).use { fos ->
-                                    tar.copyTo(fos)
-                                }
-                                val mode = entry.mode
-                                if (mode > 0) {
-                                    try {
-                                        Os.chmod(dest.absolutePath, mode)
-                                    } catch (e: Exception) {
-                                        dest.setExecutable((mode and 73) != 0, false)
-                                    }
-                                }
-                            }
-                            count++
-                            if (count % 3000 == 0) {
-                                appendLog("[*] Extracted $count files...")
-                            }
-                            entry = tar.nextEntry
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun runLuaLaTeX(rootfs: File, workDir: File) {
+    private fun executeLuaLaTeX(rootfs: File, workDir: File, texFileName: File) {
         val nativeDir = applicationInfo.nativeLibraryDir
         val prootBin = File(nativeDir, "libproot.so").absolutePath
         val loaderBin = File(nativeDir, "libproot-loader.so").absolutePath
@@ -214,7 +195,7 @@ class MainActivity : AppCompatActivity() {
             "-w", "/root",
             "/usr/bin/lualatex",
             "--interaction=nonstopmode",
-            "vector.tex"
+            texFileName.name
         )
 
         val pb = ProcessBuilder(cmd)
@@ -235,18 +216,23 @@ class MainActivity : AppCompatActivity() {
         }
 
         val exitCode = process.waitFor()
-        if (exitCode == 0) {
+        val pdfName = texFileName.nameWithoutExtension + ".pdf"
+        val outPdf = File(workDir, pdfName)
+
+        if (exitCode == 0 && outPdf.exists()) {
             appendLog("\n========================================")
-            appendLog("[SUCCESS] PDF Generated Successfully! 🎉")
+            appendLog("[SUCCESS] PDF Created Successfully! 🎉")
             appendLog("========================================")
-            val outPdf = File(workDir, "vector.pdf")
-            if (outPdf.exists()) {
-                val destPdf = File("/storage/emulated/0/Documents/MyNotes/app_vector_success.pdf")
-                outPdf.copyTo(destPdf, overwrite = true)
-                appendLog("[+] Saved to: Documents/MyNotes/app_vector_success.pdf")
-            }
+            val destPdf = File("/storage/emulated/0/Documents/MyNotes/APP_GENERATED_$pdfName")
+            outPdf.copyTo(destPdf, overwrite = true)
+            appendLog("[+] Saved to: Documents/MyNotes/APP_GENERATED_$pdfName")
         } else {
-            appendLog("\n[-] Compilation Failed with exit code: $exitCode")
+            appendLog("\n[-] Compilation finished with exit code: $exitCode")
+            if (outPdf.exists()) {
+                val destPdf = File("/storage/emulated/0/Documents/MyNotes/APP_GENERATED_$pdfName")
+                outPdf.copyTo(destPdf, overwrite = true)
+                appendLog("[+] Partial/Warning PDF saved to: Documents/MyNotes/APP_GENERATED_$pdfName")
+            }
         }
     }
 }
